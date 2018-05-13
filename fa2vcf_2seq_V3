@@ -1,0 +1,220 @@
+#!/usr/bin/perl
+use strict;
+use constant{
+	MATCH=>'*',
+	CLIPPING=>' ',
+	DELETION=>'-',
+	UNKNOWN=>'N',
+	MAT=>0,
+	GAP=>2,
+	SNP=>1,
+	INS=>3,
+	DEL=>4
+};
+my %MUL=(
+	'W'=>['A','T'],
+	'S'=>['C','G'],
+	'M'=>['A','C'],
+	'K'=>['G','T'],
+	'R'=>['A','G'],
+	'Y'=>['C','T']
+	);
+
+my ($ref, $test, $index); # ref seq and consensus index
+my $h=1;
+my $m=0; # chars to trim per line
+my $ref_name=$ARGV[1];
+my $test_name;
+my %info=(
+	'index'=>0,
+	'len'=>0,
+	'ref'=>'',
+	'alts'=>'',
+	'alleles'=>''
+	);
+
+while(<>){
+	chomp;
+	next if /^$/;
+	# is a CLUSTAL format?
+	if($h){
+		unless(/^CLUSTAL/){
+			print STDERR "aln format no correct! program exits\n";
+			exit;
+		}else{
+			$h=0;
+			print STDERR "detecting aln format correct!\n";
+			next;
+		}
+	}
+	# read seqs
+	my $name='';
+	if (/^([^\s]+)\s+/){
+		$name=$1;
+		$m=length($&) unless $m > 0;
+	}
+	if(length($name)>0){
+		$ref_name=$name if length($ref_name)==0 ; # if not set ref_name, let it be the first seq
+		if($name eq $ref_name){
+			$ref.=substr($_,$m);
+		}else{
+			$test.=substr($_,$m);
+			$test_name=$name; 
+		}
+	}else{
+		$index.=substr($_,$m);
+	}
+}
+
+# looping p
+my $p=0; #pointer index
+my $s=0; #step index
+my $N=length($ref);
+my $gap=0;
+my $type;
+my ($r,$a,$alleles,$id,$len,$gapCur);
+unless(length($test)==$N && length($ref)==length($index)){
+
+	print STDERR "lengths of seqs not equal! program will exit\n";
+	exit;
+}
+&print_header($test_name,$ref_name,$N);
+#print STDERR "index\tref_raw\talt_ref\tvar_length\ttype_of_variant\n";
+# looping seq
+while($p<$N){
+	if (substr($index,$p,1) eq MATCH or substr($test,$p,1) eq UNKNOWN){
+		$p++;
+		next;
+	}
+	# looping the final non DELETION char
+	until($p+$s>=$N or substr($index,$p+$s+1,1) eq MATCH){
+		$s++;
+	}
+	my $ssr=substr($ref,$p,$s+2);
+	my $sst=substr($test,$p,$s+2);
+	# find if has '-' and its position
+	if(rindex($ssr,DELETION)==-1 and rindex($sst,DELETION)==-1){
+		$s=0;
+		$type=&dif($p);
+	}elsif(rindex($ssr,DELETION)<length($ssr) and rindex($ssr,DELETION)>-1){
+		$s=rindex($ssr,DELETION);
+		$type=INS;
+		print STDERR "$p\t",substr($ref,$p-1,1),"$ssr\t",substr($test,$p-1,1),"$sst\t",$s+2,"\t$type\n";	
+	}elsif(rindex($sst,DELETION)<length($sst) and rindex($sst,DELETION)>-1){
+		$s=rindex($sst,DELETION);
+		$type=DEL;	
+		print STDERR "$p\t",substr($ref,$p-1,1),"$ssr\t",substr($test,$p-1,1),"$sst\t",$s+2,"\t$type\n";	
+	}else{
+		die "$p\t$ssr\t$sst\t$s\t$type\tstrange\n";	
+	}
+	# decide info of variant
+	if($type==SNP){
+		$r=substr($ref,$p,1);
+		$a=substr($test,$p,1);
+		$id=$p+1; #start from 1
+		$len=1; # SNP=>$s=0
+	}else{
+		$r=substr($ref,$p-1,$s+2);
+		$a=substr($test,$p-1,$s+2);
+		$id=$p;
+		$len=$s+2;
+	}
+	$gapCur=$r=~tr/-//;
+	$r=~s/-//g;
+	$a=~s/-//g;
+	# set info
+	$info{'ref'}=$r;
+	$info{'alts'}=$a;
+	$info{'index'}=$id-$gap;
+	$info{'alleles'}=$alleles;
+	$info{'len'}=$len;
+	$info{'alleles'}='1/1';
+	# prune alleles
+	&pruneVar();	
+	# print vcf
+	&print_allele();
+	# set new index
+	$p=$info{'index'}+$gap-1+$info{'len'};
+	$s=0;
+	$gap+=$gapCur;
+	$gapCur=0;
+	#print STDERR substr($ref, $info{'index'}-1,$info{'len'}),"=>",substr($test, $info{'index'}-1,$info{'len'});
+	#print STDERR "<=$info{'index'}\n";
+}
+# END
+
+print STDERR "converting fasta to vcf done!!\n";
+
+##############################
+# subs
+# print headers
+sub print_header(){
+	my @seq_names=@_;
+	my $len=pop @seq_names;
+	my $ref_name=pop @seq_names;
+	print "##fileformat=VCFv4.1\n";
+	print "##FORMAT=<ID=DP,Number=1,Type=Integer,Description=\"Approximate read depth\">\n";
+	print "##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n";
+	print "##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Approximate read depth.\">\n";
+	print "##contig=<ID=$ref_name,length=",$len,">\n";
+	print "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t";
+	print join "\t", @seq_names;
+	print "\n";
+}
+
+# equal and not deletion?
+sub dif(){
+	my $i=shift;
+	my $r=substr($ref,$i,1);
+	my $t=substr($test,$i,1);
+	if($r eq $t){
+		&N_N($r) ? return MAT : return GAP; 
+	}else{
+		return SNP if &N_N($r) and &N_N($t);
+		return INS if !&N_N($r) and &N_N($t);
+		return DEL if &N_N($r) and !&N_N($t);
+	}
+}
+
+# not deletion?
+sub N_N(){
+	my $s=shift;
+	$s eq DELETION ? return 0 : return 1;
+}
+
+
+# print variant
+sub print_allele(){
+	printf "%s\t%s\t.\t%s\t%s\t.\t.\tDP=2\tGT:DP\t%s:2\n",
+		$ref_name,
+		$info{'index'},
+		$info{'ref'},
+		$info{'alts'},
+		$info{'alleles'};
+}
+
+# prune variants
+# W	Weak	A			T	
+# S	Strong		C	G	
+# M	aMino	A	C		
+# K	Keto			G	T
+# R	puRine	A		G	
+# Y	pYrimidine		C		T
+sub pruneVar(){
+	if($info{'alts'}=~/N/g){$info{'alts'}='.';$info{'alleles'}='./.';return;}
+	# do with multi-alleles
+	foreach my $k (sort keys %MUL){
+		my $j=0;
+		my $alt;
+		next if index($info{'alts'},$k)==-1;
+		foreach(@{$MUL{$k}}){
+			next if $info{'ref'} eq $_;
+			$alt .= $_.",";
+		}
+		$alt=~s/,$//;
+		$info{'alts'}=$alt;
+		$info{'alleles'}='1/2' if length($alt)>1;
+		$info{'alleles'}='0/1' if length($alt)==1;
+	}
+}
+
